@@ -59,6 +59,27 @@ class StoreTests(unittest.TestCase):
         self.store.delete(parent.id)
         self.assertEqual(self.store.load(), [])
 
+    def test_move_tasks_and_subtasks_within_their_groups(self):
+        first = self.store.add("First", date(2026, 9, 21))
+        second = self.store.add("Second", date(2026, 9, 21))
+        third = self.store.add("Third", date(2026, 9, 21))
+        child_one = self.store.add("Child one", date(2026, 9, 21), parent_id=first.id)
+        child_two = self.store.add("Child two", date(2026, 9, 21), parent_id=first.id)
+
+        self.assertTrue(self.store.move(third.id, -1))
+        tasks = self.store.load()
+        roots = vitodo.visible_tasks(tasks, date(2026, 9, 21))
+        rows = vitodo.tree_rows(tasks, roots)
+        root_titles = [row.task.title for row in rows if row.task.parent_id is None]
+        self.assertEqual(root_titles, ["First", "Third", "Second"])
+
+        self.assertTrue(self.store.move(child_two.id, -1))
+        tasks = self.store.load()
+        rows = vitodo.tree_rows(tasks, vitodo.visible_tasks(tasks, date(2026, 9, 21)))
+        children = [row.task.title for row in rows if row.task.parent_id == first.id]
+        self.assertEqual(children, ["Child two", "Child one"])
+        self.assertFalse(self.store.move(first.id, -1))
+
 
 class DisplayTests(unittest.TestCase):
     def make_task(self, title, due, completed=False, parent_id=None):

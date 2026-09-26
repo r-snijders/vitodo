@@ -34,7 +34,8 @@ default. Override that location with `VITODO_DATA_DIR` or `--data-dir`.
 
 | Key | Action |
 | --- | --- |
-| `j` / `k` | Move down / up |
+| `j` / `k` | Select next / previous task |
+| `J` / `K` | Move the selected task down / up within its group |
 | `h` / `l` | Previous / next day |
 | `gg` / `G` | First / last visible task |
 | `a` | Add a task to the selected day |
@@ -63,6 +64,10 @@ from every date. Press `c` again to return to the daily view.
 Subtasks form a tree and initially inherit their parent's due date. Select a
 task and press `s` to add a child. Press `Enter` on a task with children to
 collapse or expand its subtree. Deleting a parent also deletes its descendants.
+
+Use `J` and `K` to change the persistent order of tasks. Reordering stays
+within the same date, completion group, and parent, so the task tree remains
+intact. Each move is automatically committed to the task-data Git repository.
 
 ## Git history
 

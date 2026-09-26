@@ -33,6 +33,7 @@ class Task:
     created_at: str
     completed_at: str | None = None
     parent_id: str | None = None
+    position: int = 0
 
     @classmethod
     def from_dict(cls, value: dict) -> "Task":
@@ -43,6 +44,7 @@ class Task:
             created_at=value["created_at"],
             completed_at=value.get("completed_at"),
             parent_id=value.get("parent_id"),
+            position=value.get("position", 0),
         )
 
     def to_dict(self) -> dict:
@@ -53,6 +55,7 @@ class Task:
             "created_at": self.created_at,
             "completed_at": self.completed_at,
             "parent_id": self.parent_id,
+            "position": self.position,
         }
 
 
@@ -98,9 +101,15 @@ class TaskStore:
         tasks = self.load()
         if parent_id is not None:
             self._find(tasks, parent_id)
+        peer_positions = [
+            item.position
+            for item in tasks
+            if item.parent_id == parent_id and item.due == due.isoformat()
+        ]
+        position = max(peer_positions, default=-1) + 1
         task = Task(
             uuid.uuid4().hex[:12], title.strip(), due.isoformat(), now_iso(),
-            parent_id=parent_id,
+            parent_id=parent_id, position=position,
         )
         tasks.append(task)
         kind = "subtask" if parent_id else "task"
@@ -136,6 +145,31 @@ class TaskStore:
         tasks = [item for item in tasks if item.id not in deleted]
         suffix = f" and {len(deleted) - 1} subtask(s)" if len(deleted) > 1 else ""
         self.save(tasks, f"Delete task{suffix}: {task.title}")
+
+    def move(self, task_id: str, direction: int) -> bool:
+        """Move a task among peers at the same level, date, and completion state."""
+        if direction not in (-1, 1):
+            raise ValueError("direction must be -1 or 1")
+        tasks = self.load()
+        task = self._find(tasks, task_id)
+        peers = [
+            item for item in tasks
+            if item.parent_id == task.parent_id
+            and item.due == task.due
+            and (item.completed_at is not None) == (task.completed_at is not None)
+        ]
+        peers.sort(key=lambda item: (item.position, item.created_at))
+        index = peers.index(task)
+        target_index = index + direction
+        if not 0 <= target_index < len(peers):
+            return False
+        for position, peer in enumerate(peers):
+            peer.position = position
+        target = peers[target_index]
+        task.position, target.position = target.position, task.position
+        action = "up" if direction < 0 else "down"
+        self.save(tasks, f"Move task {action}: {task.title}")
+        return True
 
     def _write(self, tasks: list[Task]) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -188,15 +222,19 @@ def visible_tasks(
     if show_all:
         return sorted(
             tasks,
-            key=lambda task: (task.due, task.completed_at is not None, task.created_at),
+            key=lambda task: (
+                task.due, task.completed_at is not None, task.position, task.created_at
+            ),
         )
     overdue = [
         task for task in tasks
         if not task.completed_at and date.fromisoformat(task.due) < today and task.due != selected.isoformat()
     ]
     selected_tasks = [task for task in tasks if task.due == selected.isoformat()]
-    overdue.sort(key=lambda task: (task.due, task.created_at))
-    selected_tasks.sort(key=lambda task: (task.completed_at is not None, task.created_at))
+    overdue.sort(key=lambda task: (task.due, task.position, task.created_at))
+    selected_tasks.sort(
+        key=lambda task: (task.completed_at is not None, task.position, task.created_at)
+    )
     return overdue + selected_tasks
 
 
@@ -226,7 +264,7 @@ def tree_rows(
             roots.append(task)
 
     def sort_key(task: Task) -> tuple:
-        return task.due, task.completed_at is not None, task.created_at
+        return task.due, task.completed_at is not None, task.position, task.created_at
 
     roots.sort(key=sort_key)
     for child_list in children.values():
@@ -367,7 +405,7 @@ class TodoUI:
             if index == self.cursor:
                 self._fill_line(screen_row, width, attr)
 
-        help_text = " j/k move  h/l day  a task  s subtask  Enter fold  x done  c all  dd delete  ? help  q quit "
+        help_text = " j/k select  J/K reorder  h/l day  a task  s subtask  Enter fold  x done  c all  ? help  q quit "
         self._put(max(0, height - 2), 0, help_text[:max(0, width - 1)], curses.A_REVERSE)
         self._fill_line(max(0, height - 2), width, curses.A_REVERSE)
         status = self.status or f"{len(self.tasks)} visible  •  data: {self.store.root}"
@@ -397,6 +435,10 @@ class TodoUI:
             self.cursor = min(max(0, len(self.tasks) - 1), self.cursor + 1)
         elif key in ("k", curses.KEY_UP):
             self.cursor = max(0, self.cursor - 1)
+        elif key == "J":
+            self.move_current(1)
+        elif key == "K":
+            self.move_current(-1)
         elif key == "g":
             self.pending_g = True
             self.status = "g…  press g for first task or d to go to a date"
@@ -514,6 +556,17 @@ class TodoUI:
             self.reload(task.id)
             self.status = "Task status committed"
 
+    def move_current(self, direction: int) -> None:
+        task = self.current()
+        if not task:
+            return
+        if self.store.move(task.id, direction):
+            self.reload(task.id)
+            self.status = "Task moved and committed"
+        else:
+            edge = "first" if direction < 0 else "last"
+            self.status = f"Task is already {edge} in its group"
+
     def delete_current(self) -> None:
         task = self.current()
         if not task:
@@ -527,7 +580,8 @@ class TodoUI:
 
     def help(self) -> None:
         lines = [
-            "VITODO KEYS", "", "j/k or arrows   move", "h/l or arrows   previous/next day",
+            "VITODO KEYS", "", "j/k or arrows   select", "J/K             move task down/up",
+            "h/l or arrows   previous/next day",
             "gg / G          first/last task", "a               add to selected day",
             "s               add subtask to selected task", "Enter           collapse/expand subtasks",
             "e               edit title and due date", "x or Space      toggle completed",
