@@ -32,6 +32,7 @@ class Task:
     due: str
     created_at: str
     completed_at: str | None = None
+    parent_id: str | None = None
 
     @classmethod
     def from_dict(cls, value: dict) -> "Task":
@@ -41,6 +42,7 @@ class Task:
             due=value["due"],
             created_at=value["created_at"],
             completed_at=value.get("completed_at"),
+            parent_id=value.get("parent_id"),
         )
 
     def to_dict(self) -> dict:
@@ -50,7 +52,15 @@ class Task:
             "due": self.due,
             "created_at": self.created_at,
             "completed_at": self.completed_at,
+            "parent_id": self.parent_id,
         }
+
+
+@dataclass
+class TaskRow:
+    task: Task
+    prefix: str = ""
+    has_children: bool = False
 
 
 class TaskStore:
@@ -84,11 +94,17 @@ class TaskStore:
         self._write(tasks)
         self._commit(message)
 
-    def add(self, title: str, due: date) -> Task:
+    def add(self, title: str, due: date, parent_id: str | None = None) -> Task:
         tasks = self.load()
-        task = Task(uuid.uuid4().hex[:12], title.strip(), due.isoformat(), now_iso())
+        if parent_id is not None:
+            self._find(tasks, parent_id)
+        task = Task(
+            uuid.uuid4().hex[:12], title.strip(), due.isoformat(), now_iso(),
+            parent_id=parent_id,
+        )
         tasks.append(task)
-        self.save(tasks, f"Add task for {task.due}: {task.title}")
+        kind = "subtask" if parent_id else "task"
+        self.save(tasks, f"Add {kind} for {task.due}: {task.title}")
         return task
 
     def update(self, task_id: str, *, title: str | None = None, due: date | None = None) -> None:
@@ -110,8 +126,16 @@ class TaskStore:
     def delete(self, task_id: str) -> None:
         tasks = self.load()
         task = self._find(tasks, task_id)
-        tasks.remove(task)
-        self.save(tasks, f"Delete task: {task.title}")
+        deleted = {task_id}
+        while True:
+            descendants = {item.id for item in tasks if item.parent_id in deleted}
+            new_ids = descendants - deleted
+            if not new_ids:
+                break
+            deleted.update(new_ids)
+        tasks = [item for item in tasks if item.id not in deleted]
+        suffix = f" and {len(deleted) - 1} subtask(s)" if len(deleted) > 1 else ""
+        self.save(tasks, f"Delete task{suffix}: {task.title}")
 
     def _write(self, tasks: list[Task]) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -153,9 +177,19 @@ def days_overdue(task: Task, today: date | None = None) -> int:
     return delta.days if delta.days < 0 else 0
 
 
-def visible_tasks(tasks: list[Task], selected: date, today: date | None = None) -> list[Task]:
+def visible_tasks(
+    tasks: list[Task],
+    selected: date,
+    today: date | None = None,
+    show_all: bool = False,
+) -> list[Task]:
     """Show unfinished overdue work first, followed by selected-day tasks."""
     today = today or date.today()
+    if show_all:
+        return sorted(
+            tasks,
+            key=lambda task: (task.due, task.completed_at is not None, task.created_at),
+        )
     overdue = [
         task for task in tasks
         if not task.completed_at and date.fromisoformat(task.due) < today and task.due != selected.isoformat()
@@ -166,6 +200,62 @@ def visible_tasks(tasks: list[Task], selected: date, today: date | None = None) 
     return overdue + selected_tasks
 
 
+def tree_rows(
+    all_tasks: list[Task], visible: list[Task], collapsed: set[str] | None = None
+) -> list[TaskRow]:
+    """Arrange visible tasks as a tree, retaining ancestors needed for context."""
+    collapsed = collapsed or set()
+    by_id = {task.id: task for task in all_tasks}
+    included = {task.id for task in visible}
+    for task in list(visible):
+        parent_id = task.parent_id
+        seen = {task.id}
+        while parent_id and parent_id in by_id and parent_id not in seen:
+            included.add(parent_id)
+            seen.add(parent_id)
+            parent_id = by_id[parent_id].parent_id
+
+    children: dict[str, list[Task]] = {}
+    roots: list[Task] = []
+    for task in all_tasks:
+        if task.id not in included:
+            continue
+        if task.parent_id and task.parent_id in included:
+            children.setdefault(task.parent_id, []).append(task)
+        else:
+            roots.append(task)
+
+    def sort_key(task: Task) -> tuple:
+        return task.due, task.completed_at is not None, task.created_at
+
+    roots.sort(key=sort_key)
+    for child_list in children.values():
+        child_list.sort(key=sort_key)
+
+    rows: list[TaskRow] = []
+    visited: set[str] = set()
+
+    def visit(task: Task, prefix: str = "", connector: str = "") -> None:
+        if task.id in visited:
+            return
+        visited.add(task.id)
+        child_list = children.get(task.id, [])
+        rows.append(TaskRow(task, prefix + connector, bool(child_list)))
+        if task.id in collapsed:
+            return
+        if not connector:
+            child_prefix = ""
+        else:
+            child_prefix = prefix + ("   " if connector == "└─ " else "│  ")
+        for index, child in enumerate(child_list):
+            connector = "└─ " if index == len(child_list) - 1 else "├─ "
+            visit(child, child_prefix, connector)
+
+    for root in roots:
+        visit(root)
+    return rows
+
+
 class TodoUI:
     def __init__(self, screen, store: TaskStore):
         self.screen = screen
@@ -174,9 +264,12 @@ class TodoUI:
         self.cursor = 0
         self.scroll = 0
         self.tasks: list[Task] = []
+        self.rows: list[TaskRow] = []
         self.status = ""
         self.pending_d = False
         self.pending_g = False
+        self.show_all = False
+        self.collapsed: set[str] = set()
         self.running = True
         self.colors = {}
 
@@ -195,7 +288,13 @@ class TodoUI:
 
     def _init_colors(self) -> None:
         if not curses.has_colors():
-            self.colors = {"green": curses.A_BOLD, "red": curses.A_BOLD, "cyan": curses.A_BOLD, "dim": curses.A_DIM}
+            self.colors = {
+                "green": curses.A_BOLD,
+                "orange": curses.A_BOLD,
+                "red": curses.A_BOLD,
+                "cyan": curses.A_BOLD,
+                "dim": curses.A_DIM,
+            }
             return
         curses.start_color()
         curses.use_default_colors()
@@ -203,16 +302,21 @@ class TodoUI:
         curses.init_pair(2, curses.COLOR_RED, -1)
         curses.init_pair(3, curses.COLOR_CYAN, -1)
         curses.init_pair(4, curses.COLOR_WHITE, -1)
+        orange = 208 if curses.COLORS > 208 else curses.COLOR_YELLOW
+        curses.init_pair(5, orange, -1)
         self.colors = {
             "green": curses.color_pair(1) | curses.A_BOLD,
             "red": curses.color_pair(2) | curses.A_BOLD,
             "cyan": curses.color_pair(3) | curses.A_BOLD,
             "dim": curses.color_pair(4) | curses.A_DIM,
+            "orange": curses.color_pair(5) | curses.A_BOLD,
         }
 
     def reload(self, keep_id: str | None = None) -> None:
         all_tasks = self.store.load()
-        self.tasks = visible_tasks(all_tasks, self.selected_day)
+        visible = visible_tasks(all_tasks, self.selected_day, show_all=self.show_all)
+        self.rows = tree_rows(all_tasks, visible, self.collapsed)
+        self.tasks = [row.task for row in self.rows]
         if keep_id:
             self.cursor = next((i for i, task in enumerate(self.tasks) if task.id == keep_id), self.cursor)
         self.cursor = max(0, min(self.cursor, max(0, len(self.tasks) - 1)))
@@ -220,8 +324,12 @@ class TodoUI:
     def draw(self) -> None:
         self.screen.erase()
         height, width = self.screen.getmaxyx()
-        selected_label = self.selected_day.strftime("%A, %d %B %Y")
-        today_mark = "  TODAY" if self.selected_day == date.today() else ""
+        selected_label = (
+            "ALL TASKS"
+            if self.show_all
+            else self.selected_day.strftime("%A, %d %B %Y")
+        )
+        today_mark = "  TODAY" if not self.show_all and self.selected_day == date.today() else ""
         self._put(0, 0, f" vitodo  {selected_label}{today_mark}", self.colors["cyan"] | curses.A_REVERSE)
         self._fill_line(0, width, self.colors["cyan"] | curses.A_REVERSE)
 
@@ -233,22 +341,33 @@ class TodoUI:
 
         if not self.tasks:
             self._put(2, 2, "No tasks for this day. Press a to add one.", self.colors["dim"])
-        for row, task in enumerate(self.tasks[self.scroll:self.scroll + list_height], start=1):
-            index = self.scroll + row - 1
+        for screen_row, item in enumerate(self.rows[self.scroll:self.scroll + list_height], start=1):
+            index = self.scroll + screen_row - 1
+            task = item.task
             due = date.fromisoformat(task.due)
             overdue = days_overdue(task)
             marker = "✓" if task.completed_at else "○"
             day_label = due.strftime("%d %b")
             overdue_label = f" {overdue:>3}d" if overdue else "     "
-            text = f" {marker} {day_label}{overdue_label}  {task.title}"
-            attr = self.colors["green"] if task.completed_at else self.colors["red"] if overdue else 0
+            fold = (
+                "▸ " if item.has_children and task.id in self.collapsed
+                else "▾ " if item.has_children
+                else "  "
+            )
+            text = f" {marker} {day_label}{overdue_label}  {item.prefix}{fold}{task.title}"
+            attr = (
+                self.colors["green"] if task.completed_at
+                else self.colors["orange"] if overdue == -1
+                else self.colors["red"] if overdue < -1
+                else 0
+            )
             if index == self.cursor:
                 attr |= curses.A_REVERSE
-            self._put(row, 0, text[:max(0, width - 1)], attr)
+            self._put(screen_row, 0, text[:max(0, width - 1)], attr)
             if index == self.cursor:
-                self._fill_line(row, width, attr)
+                self._fill_line(screen_row, width, attr)
 
-        help_text = " j/k move  h/l day  a add  e edit  x/space done  dd delete  gd date  t today  ? help  q quit "
+        help_text = " j/k move  h/l day  a task  s subtask  Enter fold  x done  c all  dd delete  ? help  q quit "
         self._put(max(0, height - 2), 0, help_text[:max(0, width - 1)], curses.A_REVERSE)
         self._fill_line(max(0, height - 2), width, curses.A_REVERSE)
         status = self.status or f"{len(self.tasks)} visible  •  data: {self.store.root}"
@@ -295,10 +414,19 @@ class TodoUI:
             self.reload()
         elif key == "a":
             self.add_task()
+        elif key == "s":
+            self.add_subtask()
         elif key == "e":
             self.edit_task()
         elif key in ("x", " "):
             self.toggle_current()
+        elif key == "c":
+            self.show_all = not self.show_all
+            self.cursor = self.scroll = 0
+            self.reload()
+            self.status = "All tasks" if self.show_all else "Daily view"
+        elif key in ("\n", "\r", curses.KEY_ENTER):
+            self.toggle_collapse()
         elif key == "d":
             self.pending_d = True
             self.status = "d…  press d again to delete"
@@ -330,6 +458,36 @@ class TodoUI:
             self.reload(task.id)
             self.status = "Task added and committed"
 
+    def add_subtask(self) -> None:
+        parent = self.current()
+        if not parent:
+            self.status = "Select a parent task first"
+            return
+        title = self.prompt(f"Subtask of ‘{parent.title}’: ")
+        if title and title.strip():
+            task = self.store.add(
+                title, date.fromisoformat(parent.due), parent_id=parent.id
+            )
+            self.collapsed.discard(parent.id)
+            self.reload(task.id)
+            self.status = "Subtask added and committed"
+
+    def toggle_collapse(self) -> None:
+        task = self.current()
+        if not task:
+            return
+        row = self.rows[self.cursor]
+        if not row.has_children:
+            self.status = "This task has no subtasks"
+            return
+        if task.id in self.collapsed:
+            self.collapsed.remove(task.id)
+            self.status = "Subtasks expanded"
+        else:
+            self.collapsed.add(task.id)
+            self.status = "Subtasks collapsed"
+        self.reload(task.id)
+
     def edit_task(self) -> None:
         task = self.current()
         if not task:
@@ -360,7 +518,8 @@ class TodoUI:
         task = self.current()
         if not task:
             return
-        answer = self.prompt(f"Delete ‘{task.title}’? [y/N] ")
+        suffix = " and all its subtasks" if self.rows[self.cursor].has_children else ""
+        answer = self.prompt(f"Delete ‘{task.title}’{suffix}? [y/N] ")
         if answer and answer.lower() == "y":
             self.store.delete(task.id)
             self.reload()
@@ -370,7 +529,9 @@ class TodoUI:
         lines = [
             "VITODO KEYS", "", "j/k or arrows   move", "h/l or arrows   previous/next day",
             "gg / G          first/last task", "a               add to selected day",
+            "s               add subtask to selected task", "Enter           collapse/expand subtasks",
             "e               edit title and due date", "x or Space      toggle completed",
+            "c               toggle all tasks (including completed)",
             "dd              delete (with confirmation)", "gd              go to YYYY-MM-DD",
             "t               jump to today", "q               quit", "", "Press any key to return",
         ]

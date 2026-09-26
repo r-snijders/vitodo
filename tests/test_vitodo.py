@@ -50,10 +50,22 @@ class StoreTests(unittest.TestCase):
         raw = json.loads((self.root / "tasks.json").read_text())
         self.assertEqual(raw[0]["title"], "Readable")
 
+    def test_subtasks_and_cascade_delete(self):
+        parent = self.store.add("Major", date(2026, 9, 21))
+        child = self.store.add("Small", date(2026, 9, 21), parent_id=parent.id)
+        grandchild = self.store.add("Tiny", date(2026, 9, 21), parent_id=child.id)
+        self.assertEqual(self.store.load()[1].parent_id, parent.id)
+
+        self.store.delete(parent.id)
+        self.assertEqual(self.store.load(), [])
+
 
 class DisplayTests(unittest.TestCase):
-    def make_task(self, title, due, completed=False):
-        return vitodo.Task("id-" + title, title, due, "2026-09-01T00:00:00+00:00", "done" if completed else None)
+    def make_task(self, title, due, completed=False, parent_id=None):
+        return vitodo.Task(
+            "id-" + title, title, due, "2026-09-01T00:00:00+00:00",
+            "done" if completed else None, parent_id,
+        )
 
     def test_days_overdue_is_negative(self):
         task = self.make_task("late", "2026-09-18")
@@ -72,6 +84,36 @@ class DisplayTests(unittest.TestCase):
         ]
         shown = vitodo.visible_tasks(tasks, date(2026, 9, 21), date(2026, 9, 21))
         self.assertEqual([task.title for task in shown], ["late", "today"])
+
+    def test_all_view_includes_open_and_completed_from_all_dates(self):
+        tasks = [
+            self.make_task("old done", "2026-09-17", completed=True),
+            self.make_task("open", "2026-09-21"),
+            self.make_task("new done", "2026-09-20", completed=True),
+        ]
+        shown = vitodo.visible_tasks(
+            tasks,
+            date(2026, 9, 21),
+            date(2026, 9, 21),
+            show_all=True,
+        )
+        self.assertEqual(
+            [task.title for task in shown], ["old done", "new done", "open"]
+        )
+
+    def test_tree_rows_and_collapse(self):
+        parent = self.make_task("parent", "2026-09-21")
+        child = self.make_task("child", "2026-09-21", parent_id=parent.id)
+        grandchild = self.make_task("grandchild", "2026-09-21", parent_id=child.id)
+        tasks = [parent, child, grandchild]
+
+        expanded = vitodo.tree_rows(tasks, tasks)
+        self.assertEqual([row.task.title for row in expanded], ["parent", "child", "grandchild"])
+        self.assertTrue(expanded[0].has_children)
+        self.assertIn("└─", expanded[1].prefix)
+
+        collapsed = vitodo.tree_rows(tasks, tasks, {parent.id})
+        self.assertEqual([row.task.title for row in collapsed], ["parent"])
 
 
 if __name__ == "__main__":

@@ -38,8 +38,11 @@ default. Override that location with `VITODO_DATA_DIR` or `--data-dir`.
 | `h` / `l` | Previous / next day |
 | `gg` / `G` | First / last visible task |
 | `a` | Add a task to the selected day |
+| `s` | Add a subtask to the selected task |
+| `Enter` | Collapse or expand a task's subtree |
 | `e` | Edit the selected task and its due date |
 | `x` or `Space` | Toggle completed |
+| `c` | Toggle all tasks across all dates, including completed |
 | `dd` | Delete, with confirmation |
 | `gd` | Go to a date (`YYYY-MM-DD`) |
 | `t` | Jump to today |
@@ -50,9 +53,16 @@ default. Override that location with `VITODO_DATA_DIR` or `--data-dir`.
 
 ## Overdue and completed tasks
 
-Unfinished tasks dated before today remain visible. Their day offset is shown
-as a negative number (for example, `-3d`) in red. Completed tasks are green.
+Unfinished tasks dated before today remain visible. A task at `-1d` is orange;
+tasks at `-2d` and earlier are red. Completed tasks are green.
 On the selected day, unfinished tasks appear before completed tasks.
+
+Press `c` to switch to an all-task view containing open and completed items
+from every date. Press `c` again to return to the daily view.
+
+Subtasks form a tree and initially inherit their parent's due date. Select a
+task and press `s` to add a child. Press `Enter` on a task with children to
+collapse or expand its subtree. Deleting a parent also deletes its descendants.
 
 ## Git history
 
