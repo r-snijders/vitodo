@@ -80,6 +80,23 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(children, ["Child two", "Child one"])
         self.assertFalse(self.store.move(first.id, -1))
 
+    def test_parent_due_date_moves_earlier_descendants_forward(self):
+        parent = self.store.add("Parent", date(2026, 9, 21))
+        child = self.store.add("Child", date(2026, 9, 22), parent_id=parent.id)
+        grandchild = self.store.add(
+            "Grandchild", date(2026, 9, 23), parent_id=child.id
+        )
+        later_child = self.store.add(
+            "Already later", date(2026, 9, 27), parent_id=parent.id
+        )
+
+        adjusted = self.store.update(parent.id, due=date(2026, 9, 25))
+        by_id = {task.id: task for task in self.store.load()}
+        self.assertEqual(adjusted, 2)
+        self.assertEqual(by_id[child.id].due, "2026-09-25")
+        self.assertEqual(by_id[grandchild.id].due, "2026-09-25")
+        self.assertEqual(by_id[later_child.id].due, "2026-09-27")
+
 
 class DisplayTests(unittest.TestCase):
     def make_task(self, title, due, completed=False, parent_id=None):
@@ -121,6 +138,34 @@ class DisplayTests(unittest.TestCase):
         self.assertEqual(
             [task.title for task in shown], ["old done", "new done", "open"]
         )
+
+    def test_open_view_includes_only_open_tasks_from_all_dates(self):
+        tasks = [
+            self.make_task("past open", "2026-09-17"),
+            self.make_task("future open", "2026-09-24"),
+            self.make_task("done", "2026-09-18", completed=True),
+        ]
+        shown = vitodo.visible_tasks(
+            tasks,
+            date(2026, 9, 21),
+            date(2026, 9, 21),
+            show_open=True,
+        )
+        self.assertEqual([task.title for task in shown], ["past open", "future open"])
+
+    def test_open_tree_does_not_restore_completed_parent(self):
+        parent = self.make_task("done parent", "2026-09-17", completed=True)
+        child = self.make_task(
+            "open child", "2026-09-18", parent_id=parent.id
+        )
+        tasks = [parent, child]
+        visible = vitodo.visible_tasks(
+            tasks, date(2026, 9, 21), show_open=True
+        )
+        rows = vitodo.tree_rows(
+            tasks, visible, include_hidden_ancestors=False
+        )
+        self.assertEqual([row.task.title for row in rows], ["open child"])
 
     def test_tree_rows_and_collapse(self):
         parent = self.make_task("parent", "2026-09-21")

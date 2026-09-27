@@ -116,14 +116,34 @@ class TaskStore:
         self.save(tasks, f"Add {kind} for {task.due}: {task.title}")
         return task
 
-    def update(self, task_id: str, *, title: str | None = None, due: date | None = None) -> None:
+    def update(
+        self, task_id: str, *, title: str | None = None, due: date | None = None
+    ) -> int:
         tasks = self.load()
         task = self._find(tasks, task_id)
+        adjusted = 0
         if title is not None:
             task.title = title.strip()
         if due is not None:
-            task.due = due.isoformat()
-        self.save(tasks, f"Edit task: {task.title}")
+            new_due = due.isoformat()
+            task.due = new_due
+            ancestors = {task.id}
+            visited = {task.id}
+            while ancestors:
+                descendants = [
+                    item
+                    for item in tasks
+                    if item.parent_id in ancestors and item.id not in visited
+                ]
+                ancestors = {item.id for item in descendants}
+                visited.update(ancestors)
+                for descendant in descendants:
+                    if descendant.due < new_due:
+                        descendant.due = new_due
+                        adjusted += 1
+        suffix = f"; align {adjusted} subtask due date(s)" if adjusted else ""
+        self.save(tasks, f"Edit task: {task.title}{suffix}")
+        return adjusted
 
     def toggle(self, task_id: str) -> None:
         tasks = self.load()
@@ -216,6 +236,7 @@ def visible_tasks(
     selected: date,
     today: date | None = None,
     show_all: bool = False,
+    show_open: bool = False,
 ) -> list[Task]:
     """Show unfinished overdue work first, followed by selected-day tasks."""
     today = today or date.today()
@@ -225,6 +246,11 @@ def visible_tasks(
             key=lambda task: (
                 task.due, task.completed_at is not None, task.position, task.created_at
             ),
+        )
+    if show_open:
+        return sorted(
+            (task for task in tasks if not task.completed_at),
+            key=lambda task: (task.due, task.position, task.created_at),
         )
     overdue = [
         task for task in tasks
@@ -239,19 +265,23 @@ def visible_tasks(
 
 
 def tree_rows(
-    all_tasks: list[Task], visible: list[Task], collapsed: set[str] | None = None
+    all_tasks: list[Task],
+    visible: list[Task],
+    collapsed: set[str] | None = None,
+    include_hidden_ancestors: bool = True,
 ) -> list[TaskRow]:
     """Arrange visible tasks as a tree, retaining ancestors needed for context."""
     collapsed = collapsed or set()
     by_id = {task.id: task for task in all_tasks}
     included = {task.id for task in visible}
-    for task in list(visible):
-        parent_id = task.parent_id
-        seen = {task.id}
-        while parent_id and parent_id in by_id and parent_id not in seen:
-            included.add(parent_id)
-            seen.add(parent_id)
-            parent_id = by_id[parent_id].parent_id
+    if include_hidden_ancestors:
+        for task in list(visible):
+            parent_id = task.parent_id
+            seen = {task.id}
+            while parent_id and parent_id in by_id and parent_id not in seen:
+                included.add(parent_id)
+                seen.add(parent_id)
+                parent_id = by_id[parent_id].parent_id
 
     children: dict[str, list[Task]] = {}
     roots: list[Task] = []
@@ -306,7 +336,7 @@ class TodoUI:
         self.status = ""
         self.pending_d = False
         self.pending_g = False
-        self.show_all = False
+        self.view_mode = "daily"
         self.collapsed: set[str] = set()
         self.running = True
         self.colors = {}
@@ -352,8 +382,18 @@ class TodoUI:
 
     def reload(self, keep_id: str | None = None) -> None:
         all_tasks = self.store.load()
-        visible = visible_tasks(all_tasks, self.selected_day, show_all=self.show_all)
-        self.rows = tree_rows(all_tasks, visible, self.collapsed)
+        visible = visible_tasks(
+            all_tasks,
+            self.selected_day,
+            show_all=self.view_mode == "all",
+            show_open=self.view_mode == "open",
+        )
+        self.rows = tree_rows(
+            all_tasks,
+            visible,
+            self.collapsed,
+            include_hidden_ancestors=self.view_mode != "open",
+        )
         self.tasks = [row.task for row in self.rows]
         if keep_id:
             self.cursor = next((i for i, task in enumerate(self.tasks) if task.id == keep_id), self.cursor)
@@ -362,12 +402,17 @@ class TodoUI:
     def draw(self) -> None:
         self.screen.erase()
         height, width = self.screen.getmaxyx()
-        selected_label = (
-            "ALL TASKS"
-            if self.show_all
-            else self.selected_day.strftime("%A, %d %B %Y")
+        labels = {
+            "all": "ALL TASKS",
+            "open": "OPEN TASKS",
+            "daily": self.selected_day.strftime("%A, %d %B %Y"),
+        }
+        selected_label = labels[self.view_mode]
+        today_mark = (
+            "  TODAY"
+            if self.view_mode == "daily" and self.selected_day == date.today()
+            else ""
         )
-        today_mark = "  TODAY" if not self.show_all and self.selected_day == date.today() else ""
         self._put(0, 0, f" vitodo  {selected_label}{today_mark}", self.colors["cyan"] | curses.A_REVERSE)
         self._fill_line(0, width, self.colors["cyan"] | curses.A_REVERSE)
 
@@ -405,7 +450,7 @@ class TodoUI:
             if index == self.cursor:
                 self._fill_line(screen_row, width, attr)
 
-        help_text = " j/k select  J/K reorder  h/l day  a task  s subtask  Enter fold  x done  c all  ? help  q quit "
+        help_text = " j/k select  J/K reorder  h/l day  a task  s subtask  x done  o open  c all  ? help  q quit "
         self._put(max(0, height - 2), 0, help_text[:max(0, width - 1)], curses.A_REVERSE)
         self._fill_line(max(0, height - 2), width, curses.A_REVERSE)
         status = self.status or f"{len(self.tasks)} visible  •  data: {self.store.root}"
@@ -463,10 +508,9 @@ class TodoUI:
         elif key in ("x", " "):
             self.toggle_current()
         elif key == "c":
-            self.show_all = not self.show_all
-            self.cursor = self.scroll = 0
-            self.reload()
-            self.status = "All tasks" if self.show_all else "Daily view"
+            self.switch_view("all")
+        elif key == "o":
+            self.switch_view("open")
         elif key in ("\n", "\r", curses.KEY_ENTER):
             self.toggle_collapse()
         elif key == "d":
@@ -479,6 +523,16 @@ class TodoUI:
 
     def current(self) -> Task | None:
         return self.tasks[self.cursor] if self.tasks else None
+
+    def switch_view(self, mode: str) -> None:
+        self.view_mode = "daily" if self.view_mode == mode else mode
+        self.cursor = self.scroll = 0
+        self.reload()
+        self.status = {
+            "daily": "Daily view",
+            "all": "All tasks",
+            "open": "Open tasks",
+        }[self.view_mode]
 
     def change_day(self, amount: int) -> None:
         self.selected_day += timedelta(days=amount)
@@ -545,9 +599,11 @@ class TodoUI:
         except ValueError:
             self.status = "Invalid date; edit cancelled"
             return
-        self.store.update(task.id, title=title, due=due)
+        adjusted = self.store.update(task.id, title=title, due=due)
         self.reload(task.id)
         self.status = "Task edited and committed"
+        if adjusted:
+            self.status += f"; {adjusted} subtask due date(s) updated"
 
     def toggle_current(self) -> None:
         task = self.current()
@@ -585,6 +641,7 @@ class TodoUI:
             "gg / G          first/last task", "a               add to selected day",
             "s               add subtask to selected task", "Enter           collapse/expand subtasks",
             "e               edit title and due date", "x or Space      toggle completed",
+            "o               toggle open tasks across all dates",
             "c               toggle all tasks (including completed)",
             "dd              delete (with confirmation)", "gd              go to YYYY-MM-DD",
             "t               jump to today", "q               quit", "", "Press any key to return",
