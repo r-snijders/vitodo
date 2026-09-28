@@ -60,7 +60,9 @@ default. Override that location with `VITODO_DATA_DIR` or `--data-dir`.
 
 Unfinished tasks dated before today remain visible. A task at `-1d` is orange;
 tasks at `-2d` and earlier are red. Completed tasks are green.
-On the selected day, unfinished tasks appear before completed tasks.
+On the selected day, unfinished tasks appear before completed tasks. When
+viewing today, tasks completed today remain visible in green even if their due
+date was in the past; they leave the daily view the following day.
 
 Press `c` to switch to an all-task view containing open and completed items
 from every date. Press `c` again to return to the daily view.

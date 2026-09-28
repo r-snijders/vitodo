@@ -177,6 +177,27 @@ class DisplayTests(unittest.TestCase):
         shown = vitodo.visible_tasks(tasks, date(2026, 9, 21), date(2026, 9, 21))
         self.assertEqual([task.title for task in shown], ["late", "today"])
 
+    def test_overdue_task_completed_today_remains_visible(self):
+        completed_today = self.make_task("finished today", "2026-09-18")
+        completed_today.completed_at = "2026-09-21T14:30:00+00:00"
+        completed_yesterday = self.make_task("finished yesterday", "2026-09-18")
+        completed_yesterday.completed_at = "2026-09-20T14:30:00+00:00"
+
+        shown = vitodo.visible_tasks(
+            [completed_today, completed_yesterday],
+            date(2026, 9, 21),
+            date(2026, 9, 21),
+        )
+        self.assertEqual([task.title for task in shown], ["finished today"])
+
+    def test_completed_today_is_not_added_to_another_day(self):
+        task = self.make_task("finished today", "2026-09-18")
+        task.completed_at = "2026-09-21T14:30:00+00:00"
+        shown = vitodo.visible_tasks(
+            [task], date(2026, 9, 20), date(2026, 9, 21)
+        )
+        self.assertEqual(shown, [])
+
     def test_all_view_includes_open_and_completed_from_all_dates(self):
         tasks = [
             self.make_task("old done", "2026-09-17", completed=True),

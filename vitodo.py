@@ -342,6 +342,19 @@ def days_overdue(task: Task, today: date | None = None) -> int:
     return delta.days if delta.days < 0 else 0
 
 
+def completion_date(task: Task) -> date | None:
+    """Return the completion date in the computer's current local timezone."""
+    if not task.completed_at:
+        return None
+    try:
+        completed = datetime.fromisoformat(task.completed_at)
+    except ValueError:
+        return None
+    if completed.tzinfo is not None:
+        completed = completed.astimezone()
+    return completed.date()
+
+
 def visible_tasks(
     tasks: list[Task],
     selected: date,
@@ -367,7 +380,14 @@ def visible_tasks(
         task for task in tasks
         if not task.completed_at and date.fromisoformat(task.due) < today and task.due != selected.isoformat()
     ]
-    selected_tasks = [task for task in tasks if task.due == selected.isoformat()]
+    selected_tasks = [
+        task for task in tasks
+        if task.due == selected.isoformat()
+        or (
+            selected == today
+            and completion_date(task) == today
+        )
+    ]
     overdue.sort(key=lambda task: (task.due, task.position, task.created_at))
     selected_tasks.sort(
         key=lambda task: (task.completed_at is not None, task.position, task.created_at)
