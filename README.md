@@ -40,6 +40,9 @@ default. Override that location with `VITODO_DATA_DIR` or `--data-dir`.
 | `gg` / `G` | First / last visible task |
 | `a` | Add a task to the selected day |
 | `s` | Add a subtask to the selected task |
+| `m` | Move the selected task under another task ID; blank moves it to the root |
+| `p` | Postpone the selected task by one day |
+| `r` | Set recurrence to `daily`, `weekly`, or `off` |
 | `Enter` | Collapse or expand a task's subtree |
 | `e` | Edit the selected task and its due date |
 | `x` or `Space` | Toggle completed |
@@ -68,6 +71,17 @@ are excluded. Press `o` again to return to the daily view.
 Subtasks form a tree and initially inherit their parent's due date. Select a
 task and press `s` to add a child. Press `Enter` on a task with children to
 collapse or expand its subtree. Deleting a parent also deletes its descendants.
+
+Each row shows the first six characters of its task ID. Press `m`, then enter
+that short ID to move the selected task below it. Leave the ID blank to move
+the task back to the root. Cycles are rejected. If the new parent is due later,
+the moved task and any earlier descendants are aligned to the parent's date.
+
+Press `r` to make a task repeat daily or weekly, or to turn recurrence off.
+Recurring tasks show `↻D` or `↻W`; completing one creates the next occurrence
+at the following interval. Reopening and completing it again does not create a
+duplicate occurrence. Press `p` to move a task one day forward; its earlier
+subtasks move forward with it.
 
 Use `J` and `K` to change the persistent order of tasks. Reordering stays
 within the same date, completion group, and parent, so the task tree remains

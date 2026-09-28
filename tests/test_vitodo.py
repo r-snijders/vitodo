@@ -97,6 +97,60 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(by_id[grandchild.id].due, "2026-09-25")
         self.assertEqual(by_id[later_child.id].due, "2026-09-27")
 
+    def test_reparent_to_task_and_back_to_root(self):
+        parent = self.store.add("Parent", date(2026, 9, 25))
+        child = self.store.add("Child", date(2026, 9, 21))
+        grandchild = self.store.add("Grandchild", date(2026, 9, 22), child.id)
+
+        adjusted = self.store.reparent(child.id, parent.id)
+        by_id = {task.id: task for task in self.store.load()}
+        self.assertEqual(adjusted, 2)
+        self.assertEqual(by_id[child.id].parent_id, parent.id)
+        self.assertEqual(by_id[child.id].due, "2026-09-25")
+        self.assertEqual(by_id[grandchild.id].due, "2026-09-25")
+
+        self.store.reparent(child.id, None)
+        self.assertIsNone({task.id: task for task in self.store.load()}[child.id].parent_id)
+
+    def test_reparent_rejects_cycles_and_resolves_short_ids(self):
+        parent = self.store.add("Parent", date(2026, 9, 21))
+        child = self.store.add("Child", date(2026, 9, 21), parent.id)
+        self.assertEqual(self.store.resolve_id(parent.id[:6]).id, parent.id)
+        with self.assertRaises(ValueError):
+            self.store.reparent(parent.id, child.id)
+        with self.assertRaises(ValueError):
+            self.store.reparent(parent.id, parent.id)
+
+    def test_daily_recurrence_creates_next_occurrence_once(self):
+        task = self.store.add("Daily review", date(2026, 9, 21))
+        self.store.update(task.id, recurrence="daily", update_recurrence=True)
+        next_task = self.store.toggle(task.id)
+        self.assertIsNotNone(next_task)
+        self.assertEqual(next_task.due, "2026-09-22")
+        self.assertEqual(next_task.recurrence, "daily")
+        self.assertEqual(next_task.series_id, task.id)
+
+        self.store.toggle(task.id)
+        duplicate = self.store.toggle(task.id)
+        self.assertIsNone(duplicate)
+        occurrences = [
+            item for item in self.store.load()
+            if item.series_id == task.id and item.due == "2026-09-22"
+        ]
+        self.assertEqual(len(occurrences), 1)
+
+    def test_weekly_recurrence_and_postpone_propagation(self):
+        parent = self.store.add("Weekly", date(2026, 9, 21))
+        child = self.store.add("Child", date(2026, 9, 21), parent.id)
+        self.store.update(parent.id, recurrence="weekly", update_recurrence=True)
+        created = self.store.toggle(parent.id)
+        self.assertEqual(created.due, "2026-09-28")
+
+        adjusted = self.store.update(parent.id, due=date(2026, 9, 22))
+        self.assertEqual(adjusted, 1)
+        by_id = {task.id: task for task in self.store.load()}
+        self.assertEqual(by_id[child.id].due, "2026-09-22")
+
 
 class DisplayTests(unittest.TestCase):
     def make_task(self, title, due, completed=False, parent_id=None):

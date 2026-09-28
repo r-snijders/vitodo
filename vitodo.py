@@ -34,6 +34,8 @@ class Task:
     completed_at: str | None = None
     parent_id: str | None = None
     position: int = 0
+    recurrence: str | None = None
+    series_id: str | None = None
 
     @classmethod
     def from_dict(cls, value: dict) -> "Task":
@@ -45,6 +47,8 @@ class Task:
             completed_at=value.get("completed_at"),
             parent_id=value.get("parent_id"),
             position=value.get("position", 0),
+            recurrence=value.get("recurrence"),
+            series_id=value.get("series_id"),
         )
 
     def to_dict(self) -> dict:
@@ -56,6 +60,8 @@ class Task:
             "completed_at": self.completed_at,
             "parent_id": self.parent_id,
             "position": self.position,
+            "recurrence": self.recurrence,
+            "series_id": self.series_id,
         }
 
 
@@ -117,13 +123,24 @@ class TaskStore:
         return task
 
     def update(
-        self, task_id: str, *, title: str | None = None, due: date | None = None
+        self,
+        task_id: str,
+        *,
+        title: str | None = None,
+        due: date | None = None,
+        recurrence: str | None = None,
+        update_recurrence: bool = False,
     ) -> int:
         tasks = self.load()
         task = self._find(tasks, task_id)
         adjusted = 0
         if title is not None:
             task.title = title.strip()
+        if update_recurrence:
+            if recurrence not in (None, "daily", "weekly"):
+                raise ValueError("recurrence must be daily, weekly, or None")
+            task.recurrence = recurrence
+            task.series_id = (task.series_id or task.id) if recurrence else None
         if due is not None:
             new_due = due.isoformat()
             task.due = new_due
@@ -145,12 +162,106 @@ class TaskStore:
         self.save(tasks, f"Edit task: {task.title}{suffix}")
         return adjusted
 
-    def toggle(self, task_id: str) -> None:
+    def toggle(self, task_id: str) -> Task | None:
         tasks = self.load()
         task = self._find(tasks, task_id)
         task.completed_at = None if task.completed_at else now_iso()
         action = "Reopen" if task.completed_at is None else "Complete"
-        self.save(tasks, f"{action} task: {task.title}")
+        next_task = None
+        if task.completed_at and task.recurrence:
+            interval = timedelta(days=1 if task.recurrence == "daily" else 7)
+            next_due = date.fromisoformat(task.due) + interval
+            series_id = task.series_id or task.id
+            task.series_id = series_id
+            existing = next(
+                (
+                    item for item in tasks
+                    if item.series_id == series_id
+                    and item.due == next_due.isoformat()
+                    and item.completed_at is None
+                ),
+                None,
+            )
+            if existing is None:
+                due_value = next_due.isoformat()
+                if task.parent_id:
+                    parent = next(
+                        (item for item in tasks if item.id == task.parent_id), None
+                    )
+                    if parent and parent.due > due_value:
+                        due_value = parent.due
+                peer_positions = [
+                    item.position for item in tasks
+                    if item.parent_id == task.parent_id and item.due == due_value
+                ]
+                next_task = Task(
+                    uuid.uuid4().hex[:12], task.title, due_value, now_iso(),
+                    parent_id=task.parent_id,
+                    position=max(peer_positions, default=-1) + 1,
+                    recurrence=task.recurrence,
+                    series_id=series_id,
+                )
+                tasks.append(next_task)
+        suffix = f"; create next {task.recurrence} occurrence" if next_task else ""
+        self.save(tasks, f"{action} task: {task.title}{suffix}")
+        return next_task
+
+    def reparent(self, task_id: str, parent_id: str | None) -> int:
+        """Move a task below another task, or to the root when parent_id is None."""
+        tasks = self.load()
+        task = self._find(tasks, task_id)
+        parent = self._find(tasks, parent_id) if parent_id else None
+        if parent and parent.id == task.id:
+            raise ValueError("A task cannot be its own parent")
+
+        ancestor_id = parent.parent_id if parent else None
+        seen: set[str] = set()
+        while ancestor_id and ancestor_id not in seen:
+            if ancestor_id == task.id:
+                raise ValueError("A task cannot be moved into its own subtree")
+            seen.add(ancestor_id)
+            ancestor = next((item for item in tasks if item.id == ancestor_id), None)
+            ancestor_id = ancestor.parent_id if ancestor else None
+
+        task.parent_id = parent.id if parent else None
+        peer_positions = [
+            item.position for item in tasks
+            if item.id != task.id
+            and item.parent_id == task.parent_id
+            and item.due == task.due
+        ]
+        task.position = max(peer_positions, default=-1) + 1
+
+        adjusted = 0
+        if parent and task.due < parent.due:
+            new_due = parent.due
+            task.due = new_due
+            adjusted += 1
+            descendants = {task.id}
+            visited = {task.id}
+            while descendants:
+                children = [
+                    item for item in tasks
+                    if item.parent_id in descendants and item.id not in visited
+                ]
+                descendants = {item.id for item in children}
+                visited.update(descendants)
+                for child in children:
+                    if child.due < new_due:
+                        child.due = new_due
+                        adjusted += 1
+
+        destination = parent.title if parent else "root"
+        self.save(tasks, f"Move task under {destination}: {task.title}")
+        return adjusted
+
+    def resolve_id(self, prefix: str) -> Task:
+        matches = [task for task in self.load() if task.id.startswith(prefix.strip())]
+        if not matches:
+            raise KeyError(f"No task ID starts with {prefix}")
+        if len(matches) > 1:
+            raise ValueError(f"Task ID {prefix} is ambiguous; enter more characters")
+        return matches[0]
 
     def delete(self, task_id: str) -> None:
         tasks = self.load()
@@ -437,7 +548,11 @@ class TodoUI:
                 else "▾ " if item.has_children
                 else "  "
             )
-            text = f" {marker} {day_label}{overdue_label}  {item.prefix}{fold}{task.title}"
+            repeat = {"daily": "↻D", "weekly": "↻W"}.get(task.recurrence, "  ")
+            text = (
+                f" {task.id[:6]}  {marker} {day_label}{overdue_label} {repeat} "
+                f" {item.prefix}{fold}{task.title}"
+            )
             attr = (
                 self.colors["green"] if task.completed_at
                 else self.colors["orange"] if overdue == -1
@@ -450,7 +565,7 @@ class TodoUI:
             if index == self.cursor:
                 self._fill_line(screen_row, width, attr)
 
-        help_text = " j/k select  J/K reorder  h/l day  a task  s subtask  x done  o open  c all  ? help  q quit "
+        help_text = " j/k select  J/K reorder  m nest  p +1d  r repeat  x done  o open  c all  ? help  q quit "
         self._put(max(0, height - 2), 0, help_text[:max(0, width - 1)], curses.A_REVERSE)
         self._fill_line(max(0, height - 2), width, curses.A_REVERSE)
         status = self.status or f"{len(self.tasks)} visible  •  data: {self.store.root}"
@@ -505,6 +620,12 @@ class TodoUI:
             self.add_subtask()
         elif key == "e":
             self.edit_task()
+        elif key == "m":
+            self.reparent_current()
+        elif key == "p":
+            self.postpone_current()
+        elif key == "r":
+            self.set_recurrence()
         elif key in ("x", " "):
             self.toggle_current()
         elif key == "c":
@@ -608,9 +729,63 @@ class TodoUI:
     def toggle_current(self) -> None:
         task = self.current()
         if task:
-            self.store.toggle(task.id)
+            next_task = self.store.toggle(task.id)
             self.reload(task.id)
             self.status = "Task status committed"
+            if next_task:
+                self.status += f"; next occurrence: {next_task.due}"
+
+    def reparent_current(self) -> None:
+        task = self.current()
+        if not task:
+            return
+        value = self.prompt("Move under task ID (blank = root): ")
+        if value is None:
+            return
+        try:
+            parent_id = self.store.resolve_id(value).id if value.strip() else None
+            adjusted = self.store.reparent(task.id, parent_id)
+        except (KeyError, ValueError) as exc:
+            self.status = str(exc).strip("'")
+            return
+        if parent_id:
+            self.collapsed.discard(parent_id)
+        self.reload(task.id)
+        self.status = "Task moved and committed"
+        if adjusted:
+            self.status += f"; {adjusted} due date(s) aligned"
+
+    def postpone_current(self) -> None:
+        task = self.current()
+        if not task:
+            return
+        adjusted = self.store.update(
+            task.id, due=date.fromisoformat(task.due) + timedelta(days=1)
+        )
+        self.reload(task.id)
+        self.status = "Task postponed by one day and committed"
+        if adjusted:
+            self.status += f"; {adjusted} subtask due date(s) updated"
+
+    def set_recurrence(self) -> None:
+        task = self.current()
+        if not task:
+            return
+        current = task.recurrence or "off"
+        value = self.prompt("Repeat [daily/weekly/off]: ", current)
+        if value is None:
+            return
+        recurrence = value.strip().lower()
+        if recurrence not in ("daily", "weekly", "off"):
+            self.status = "Use daily, weekly, or off"
+            return
+        self.store.update(
+            task.id,
+            recurrence=None if recurrence == "off" else recurrence,
+            update_recurrence=True,
+        )
+        self.reload(task.id)
+        self.status = f"Recurrence set to {recurrence} and committed"
 
     def move_current(self, direction: int) -> None:
         task = self.current()
@@ -639,7 +814,9 @@ class TodoUI:
             "VITODO KEYS", "", "j/k or arrows   select", "J/K             move task down/up",
             "h/l or arrows   previous/next day",
             "gg / G          first/last task", "a               add to selected day",
-            "s               add subtask to selected task", "Enter           collapse/expand subtasks",
+            "s               add subtask to selected task", "m               move under task ID (blank = root)",
+            "p               postpone selected task by one day",
+            "r               set daily/weekly recurrence", "Enter           collapse/expand subtasks",
             "e               edit title and due date", "x or Space      toggle completed",
             "o               toggle open tasks across all dates",
             "c               toggle all tasks (including completed)",
