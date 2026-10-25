@@ -75,7 +75,7 @@ Subtasks form a tree and initially inherit their parent's due date. Select a
 task and press `s` to add a child. Press `Enter` on a task with children to
 collapse or expand its subtree. Deleting a parent also deletes its descendants.
 
-Press `n` to attach a note to the selected task. Notes are displayed in grey
+Press `n` to attach a note to the selected task. Notes are displayed in dark grey
 inside the task tree, have no deadline or completion state, and fold together
 with their parent. Notes can be edited with `e`, reordered with `J`/`K`, and
 deleted with `dd` just like other items.

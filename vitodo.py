@@ -557,6 +557,7 @@ class TodoUI:
                 "red": curses.A_BOLD,
                 "cyan": curses.A_BOLD,
                 "dim": curses.A_DIM,
+                "grey": curses.A_DIM,
             }
             return
         curses.start_color()
@@ -566,12 +567,19 @@ class TodoUI:
         curses.init_pair(3, curses.COLOR_CYAN, -1)
         curses.init_pair(4, curses.COLOR_WHITE, -1)
         orange = 208 if curses.COLORS > 208 else curses.COLOR_YELLOW
+        grey = 242 if curses.COLORS >= 256 else curses.COLOR_WHITE
         curses.init_pair(5, orange, -1)
+        curses.init_pair(6, grey, -1)
         self.colors = {
             "green": curses.color_pair(1) | curses.A_BOLD,
             "red": curses.color_pair(2) | curses.A_BOLD,
             "cyan": curses.color_pair(3) | curses.A_BOLD,
             "dim": curses.color_pair(4) | curses.A_DIM,
+            "grey": (
+                curses.color_pair(6)
+                if curses.COLORS >= 256
+                else curses.color_pair(6) | curses.A_DIM
+            ),
             "orange": curses.color_pair(5) | curses.A_BOLD,
         }
 
@@ -641,7 +649,7 @@ class TodoUI:
                 f" {item.prefix}{fold}{task.title}"
             )
             attr = (
-                self.colors["dim"] if task.kind == "note"
+                self.colors["grey"] if task.kind == "note"
                 else self.colors["green"] if task.completed_at
                 else self.colors["orange"] if overdue == -1
                 else self.colors["red"] if overdue < -1
