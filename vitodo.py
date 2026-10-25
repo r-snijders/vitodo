@@ -29,26 +29,28 @@ def now_iso() -> str:
 class Task:
     id: str
     title: str
-    due: str
+    due: str | None
     created_at: str
     completed_at: str | None = None
     parent_id: str | None = None
     position: int = 0
     recurrence: str | None = None
     series_id: str | None = None
+    kind: str = "task"
 
     @classmethod
     def from_dict(cls, value: dict) -> "Task":
         return cls(
             id=value["id"],
             title=value["title"],
-            due=value["due"],
+            due=value.get("due"),
             created_at=value["created_at"],
             completed_at=value.get("completed_at"),
             parent_id=value.get("parent_id"),
             position=value.get("position", 0),
             recurrence=value.get("recurrence"),
             series_id=value.get("series_id"),
+            kind=value.get("kind", "task"),
         )
 
     def to_dict(self) -> dict:
@@ -62,6 +64,7 @@ class Task:
             "position": self.position,
             "recurrence": self.recurrence,
             "series_id": self.series_id,
+            "kind": self.kind,
         }
 
 
@@ -105,8 +108,13 @@ class TaskStore:
 
     def add(self, title: str, due: date, parent_id: str | None = None) -> Task:
         tasks = self.load()
+        parent = None
         if parent_id is not None:
-            self._find(tasks, parent_id)
+            parent = self._find(tasks, parent_id)
+            if parent.kind == "note":
+                raise ValueError("Tasks cannot be added below a note")
+            if parent.due and due.isoformat() < parent.due:
+                due = date.fromisoformat(parent.due)
         peer_positions = [
             item.position
             for item in tasks
@@ -121,6 +129,29 @@ class TaskStore:
         kind = "subtask" if parent_id else "task"
         self.save(tasks, f"Add {kind} for {task.due}: {task.title}")
         return task
+
+    def add_note(self, text: str, parent_id: str) -> Task:
+        tasks = self.load()
+        parent = self._find(tasks, parent_id)
+        if parent.kind == "note":
+            raise ValueError("Notes can only be attached to tasks")
+        peer_positions = [
+            item.position
+            for item in tasks
+            if item.parent_id == parent_id and item.kind == "note"
+        ]
+        note = Task(
+            uuid.uuid4().hex[:12],
+            text.strip(),
+            None,
+            now_iso(),
+            parent_id=parent_id,
+            position=max(peer_positions, default=-1) + 1,
+            kind="note",
+        )
+        tasks.append(note)
+        self.save(tasks, f"Add note to {parent.title}: {note.title}")
+        return note
 
     def update(
         self,
@@ -137,27 +168,18 @@ class TaskStore:
         if title is not None:
             task.title = title.strip()
         if update_recurrence:
+            if task.kind == "note":
+                raise ValueError("Notes cannot recur")
             if recurrence not in (None, "daily", "weekly"):
                 raise ValueError("recurrence must be daily, weekly, or None")
             task.recurrence = recurrence
             task.series_id = (task.series_id or task.id) if recurrence else None
         if due is not None:
+            if task.kind == "note":
+                raise ValueError("Notes do not have deadlines")
             new_due = due.isoformat()
             task.due = new_due
-            ancestors = {task.id}
-            visited = {task.id}
-            while ancestors:
-                descendants = [
-                    item
-                    for item in tasks
-                    if item.parent_id in ancestors and item.id not in visited
-                ]
-                ancestors = {item.id for item in descendants}
-                visited.update(ancestors)
-                for descendant in descendants:
-                    if descendant.due < new_due:
-                        descendant.due = new_due
-                        adjusted += 1
+            adjusted = self._align_descendant_due_dates(tasks, task.id, new_due)
         suffix = f"; align {adjusted} subtask due date(s)" if adjusted else ""
         self.save(tasks, f"Edit task: {task.title}{suffix}")
         return adjusted
@@ -165,6 +187,8 @@ class TaskStore:
     def toggle(self, task_id: str) -> Task | None:
         tasks = self.load()
         task = self._find(tasks, task_id)
+        if task.kind == "note":
+            raise ValueError("Notes cannot be completed")
         task.completed_at = None if task.completed_at else now_iso()
         action = "Reopen" if task.completed_at is None else "Complete"
         next_task = None
@@ -188,7 +212,7 @@ class TaskStore:
                     parent = next(
                         (item for item in tasks if item.id == task.parent_id), None
                     )
-                    if parent and parent.due > due_value:
+                    if parent and parent.due and parent.due > due_value:
                         due_value = parent.due
                 peer_positions = [
                     item.position for item in tasks
@@ -211,6 +235,10 @@ class TaskStore:
         tasks = self.load()
         task = self._find(tasks, task_id)
         parent = self._find(tasks, parent_id) if parent_id else None
+        if parent and parent.kind == "note":
+            raise ValueError("Tasks and notes cannot be moved under a note")
+        if task.kind == "note" and parent is None:
+            raise ValueError("A note must remain attached to a task")
         if parent and parent.id == task.id:
             raise ValueError("A task cannot be its own parent")
 
@@ -233,23 +261,11 @@ class TaskStore:
         task.position = max(peer_positions, default=-1) + 1
 
         adjusted = 0
-        if parent and task.due < parent.due:
+        if parent and task.due and parent.due and task.due < parent.due:
             new_due = parent.due
             task.due = new_due
             adjusted += 1
-            descendants = {task.id}
-            visited = {task.id}
-            while descendants:
-                children = [
-                    item for item in tasks
-                    if item.parent_id in descendants and item.id not in visited
-                ]
-                descendants = {item.id for item in children}
-                visited.update(descendants)
-                for child in children:
-                    if child.due < new_due:
-                        child.due = new_due
-                        adjusted += 1
+            adjusted += self._align_descendant_due_dates(tasks, task.id, new_due)
 
         destination = parent.title if parent else "root"
         self.save(tasks, f"Move task under {destination}: {task.title}")
@@ -287,6 +303,7 @@ class TaskStore:
             item for item in tasks
             if item.parent_id == task.parent_id
             and item.due == task.due
+            and item.kind == task.kind
             and (item.completed_at is not None) == (task.completed_at is not None)
         ]
         peers.sort(key=lambda item: (item.position, item.created_at))
@@ -301,6 +318,28 @@ class TaskStore:
         action = "up" if direction < 0 else "down"
         self.save(tasks, f"Move task {action}: {task.title}")
         return True
+
+    @staticmethod
+    def _align_descendant_due_dates(
+        tasks: list[Task], parent_id: str, minimum_due: str
+    ) -> int:
+        """Move every dated descendant earlier than minimum_due forward."""
+        adjusted = 0
+        ancestors = {parent_id}
+        visited = {parent_id}
+        while ancestors:
+            descendants = [
+                item
+                for item in tasks
+                if item.parent_id in ancestors and item.id not in visited
+            ]
+            ancestors = {item.id for item in descendants}
+            visited.update(ancestors)
+            for descendant in descendants:
+                if descendant.due and descendant.due < minimum_due:
+                    descendant.due = minimum_due
+                    adjusted += 1
+        return adjusted
 
     def _write(self, tasks: list[Task]) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -335,7 +374,7 @@ class TaskStore:
 
 
 def days_overdue(task: Task, today: date | None = None) -> int:
-    if task.completed_at:
+    if task.completed_at or task.due is None:
         return 0
     today = today or date.today()
     delta = date.fromisoformat(task.due) - today
@@ -368,25 +407,34 @@ def visible_tasks(
         return sorted(
             tasks,
             key=lambda task: (
-                task.due, task.completed_at is not None, task.position, task.created_at
+                task.due is None,
+                task.due or "",
+                task.completed_at is not None,
+                task.position,
+                task.created_at,
             ),
         )
     if show_open:
         return sorted(
-            (task for task in tasks if not task.completed_at),
-            key=lambda task: (task.due, task.position, task.created_at),
+            (task for task in tasks if task.kind != "note" and not task.completed_at),
+            key=lambda task: (task.due or "", task.position, task.created_at),
         )
     overdue = [
         task for task in tasks
-        if not task.completed_at and date.fromisoformat(task.due) < today and task.due != selected.isoformat()
+        if task.kind != "note"
+        and not task.completed_at
+        and task.due is not None
+        and date.fromisoformat(task.due) < today
+        and task.due != selected.isoformat()
     ]
     selected_tasks = [
         task for task in tasks
-        if task.due == selected.isoformat()
+        if task.kind != "note"
+        and (task.due == selected.isoformat()
         or (
             selected == today
             and completion_date(task) == today
-        )
+        ))
     ]
     overdue.sort(key=lambda task: (task.due, task.position, task.created_at))
     selected_tasks.sort(
@@ -405,6 +453,16 @@ def tree_rows(
     collapsed = collapsed or set()
     by_id = {task.id: task for task in all_tasks}
     included = {task.id for task in visible}
+    while True:
+        notes = {
+            task.id
+            for task in all_tasks
+            if task.kind == "note" and task.parent_id in included
+        }
+        new_notes = notes - included
+        if not new_notes:
+            break
+        included.update(new_notes)
     if include_hidden_ancestors:
         for task in list(visible):
             parent_id = task.parent_id
@@ -425,7 +483,13 @@ def tree_rows(
             roots.append(task)
 
     def sort_key(task: Task) -> tuple:
-        return task.due, task.completed_at is not None, task.position, task.created_at
+        return (
+            task.due is None,
+            task.due or "",
+            task.completed_at is not None,
+            task.position,
+            task.created_at,
+        )
 
     roots.sort(key=sort_key)
     for child_list in children.values():
@@ -558,10 +622,13 @@ class TodoUI:
         for screen_row, item in enumerate(self.rows[self.scroll:self.scroll + list_height], start=1):
             index = self.scroll + screen_row - 1
             task = item.task
-            due = date.fromisoformat(task.due)
             overdue = days_overdue(task)
-            marker = "✓" if task.completed_at else "○"
-            day_label = due.strftime("%d %b")
+            marker = "·" if task.kind == "note" else "✓" if task.completed_at else "○"
+            day_label = (
+                "      "
+                if task.due is None
+                else date.fromisoformat(task.due).strftime("%d %b")
+            )
             overdue_label = f" {overdue:>3}d" if overdue else "     "
             fold = (
                 "▸ " if item.has_children and task.id in self.collapsed
@@ -574,7 +641,8 @@ class TodoUI:
                 f" {item.prefix}{fold}{task.title}"
             )
             attr = (
-                self.colors["green"] if task.completed_at
+                self.colors["dim"] if task.kind == "note"
+                else self.colors["green"] if task.completed_at
                 else self.colors["orange"] if overdue == -1
                 else self.colors["red"] if overdue < -1
                 else 0
@@ -585,7 +653,7 @@ class TodoUI:
             if index == self.cursor:
                 self._fill_line(screen_row, width, attr)
 
-        help_text = " j/k select  J/K reorder  m nest  p +1d  r repeat  x done  o open  c all  ? help  q quit "
+        help_text = " j/k select  a task  s subtask  n note  m nest  p +1d  x done  o open  c all  ? help  q quit "
         self._put(max(0, height - 2), 0, help_text[:max(0, width - 1)], curses.A_REVERSE)
         self._fill_line(max(0, height - 2), width, curses.A_REVERSE)
         status = self.status or f"{len(self.tasks)} visible  •  data: {self.store.root}"
@@ -638,6 +706,8 @@ class TodoUI:
             self.add_task()
         elif key == "s":
             self.add_subtask()
+        elif key == "n":
+            self.add_note()
         elif key == "e":
             self.edit_task()
         elif key == "m":
@@ -700,6 +770,9 @@ class TodoUI:
         if not parent:
             self.status = "Select a parent task first"
             return
+        if parent.kind == "note":
+            self.status = "A note cannot contain subtasks"
+            return
         title = self.prompt(f"Subtask of ‘{parent.title}’: ")
         if title and title.strip():
             task = self.store.add(
@@ -709,13 +782,28 @@ class TodoUI:
             self.reload(task.id)
             self.status = "Subtask added and committed"
 
+    def add_note(self) -> None:
+        parent = self.current()
+        if not parent:
+            self.status = "Select a task first"
+            return
+        if parent.kind == "note":
+            self.status = "Select a task, not another note"
+            return
+        text = self.prompt(f"Note for ‘{parent.title}’: ")
+        if text and text.strip():
+            note = self.store.add_note(text, parent.id)
+            self.collapsed.discard(parent.id)
+            self.reload(note.id)
+            self.status = "Note added and committed"
+
     def toggle_collapse(self) -> None:
         task = self.current()
         if not task:
             return
         row = self.rows[self.cursor]
         if not row.has_children:
-            self.status = "This task has no subtasks"
+            self.status = "This item has no subtasks or notes"
             return
         if task.id in self.collapsed:
             self.collapsed.remove(task.id)
@@ -731,6 +819,11 @@ class TodoUI:
             return
         title = self.prompt("Edit title: ", task.title)
         if title is None or not title.strip():
+            return
+        if task.kind == "note":
+            self.store.update(task.id, title=title)
+            self.reload(task.id)
+            self.status = "Note edited and committed"
             return
         due_value = self.prompt("Due date (YYYY-MM-DD): ", task.due)
         if due_value is None:
@@ -748,12 +841,16 @@ class TodoUI:
 
     def toggle_current(self) -> None:
         task = self.current()
-        if task:
-            next_task = self.store.toggle(task.id)
-            self.reload(task.id)
-            self.status = "Task status committed"
-            if next_task:
-                self.status += f"; next occurrence: {next_task.due}"
+        if not task:
+            return
+        if task.kind == "note":
+            self.status = "Notes do not have a completion state"
+            return
+        next_task = self.store.toggle(task.id)
+        self.reload(task.id)
+        self.status = "Task status committed"
+        if next_task:
+            self.status += f"; next occurrence: {next_task.due}"
 
     def reparent_current(self) -> None:
         task = self.current()
@@ -779,6 +876,9 @@ class TodoUI:
         task = self.current()
         if not task:
             return
+        if task.kind == "note":
+            self.status = "Notes do not have deadlines"
+            return
         adjusted = self.store.update(
             task.id, due=date.fromisoformat(task.due) + timedelta(days=1)
         )
@@ -790,6 +890,9 @@ class TodoUI:
     def set_recurrence(self) -> None:
         task = self.current()
         if not task:
+            return
+        if task.kind == "note":
+            self.status = "Notes cannot recur"
             return
         current = task.recurrence or "off"
         value = self.prompt("Repeat [daily/weekly/off]: ", current)
@@ -834,7 +937,8 @@ class TodoUI:
             "VITODO KEYS", "", "j/k or arrows   select", "J/K             move task down/up",
             "h/l or arrows   previous/next day",
             "gg / G          first/last task", "a               add to selected day",
-            "s               add subtask to selected task", "m               move under task ID (blank = root)",
+            "s               add subtask to selected task", "n               add note to selected task",
+            "m               move under task ID (blank = root)",
             "p               postpone selected task by one day",
             "r               set daily/weekly recurrence", "Enter           collapse/expand subtasks",
             "e               edit title and due date", "x or Space      toggle completed",

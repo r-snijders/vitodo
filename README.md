@@ -40,6 +40,7 @@ default. Override that location with `VITODO_DATA_DIR` or `--data-dir`.
 | `gg` / `G` | First / last visible task |
 | `a` | Add a task to the selected day |
 | `s` | Add a subtask to the selected task |
+| `n` | Add a deadline-free note to the selected task |
 | `m` | Move the selected task under another task ID; blank moves it to the root |
 | `p` | Postpone the selected task by one day |
 | `r` | Set recurrence to `daily`, `weekly`, or `off` |
@@ -74,6 +75,11 @@ Subtasks form a tree and initially inherit their parent's due date. Select a
 task and press `s` to add a child. Press `Enter` on a task with children to
 collapse or expand its subtree. Deleting a parent also deletes its descendants.
 
+Press `n` to attach a note to the selected task. Notes are displayed in grey
+inside the task tree, have no deadline or completion state, and fold together
+with their parent. Notes can be edited with `e`, reordered with `J`/`K`, and
+deleted with `dd` just like other items.
+
 Each row shows the first six characters of its task ID. Press `m`, then enter
 that short ID to move the selected task below it. Leave the ID blank to move
 the task back to the root. Cycles are rejected. If the new parent is due later,
@@ -89,9 +95,10 @@ Use `J` and `K` to change the persistent order of tasks. Reordering stays
 within the same date, completion group, and parent, so the task tree remains
 intact. Each move is automatically committed to the task-data Git repository.
 
-When a parent task is moved to a later due date, any descendants with an
-earlier due date are moved forward to that date as part of the same edit.
-Descendants that are already due later keep their dates.
+Whenever a parent deadline changes, every nested subtask with an earlier
+deadline is moved forward to the parent's new date as part of the same edit.
+This applies recursively at every depth. Descendants already due later keep
+their dates, while notes remain deadline-free.
 
 ## Git history
 

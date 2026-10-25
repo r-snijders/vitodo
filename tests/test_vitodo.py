@@ -59,6 +59,38 @@ class StoreTests(unittest.TestCase):
         self.store.delete(parent.id)
         self.assertEqual(self.store.load(), [])
 
+    def test_notes_have_no_deadline_and_are_git_backed(self):
+        parent = self.store.add("Major", date(2026, 9, 21))
+        note = self.store.add_note("Remember the edge case", parent.id)
+        stored = {item.id: item for item in self.store.load()}[note.id]
+
+        self.assertEqual(stored.kind, "note")
+        self.assertIsNone(stored.due)
+        self.assertEqual(stored.parent_id, parent.id)
+        raw = json.loads((self.root / "tasks.json").read_text())
+        raw_note = next(item for item in raw if item["id"] == note.id)
+        self.assertIsNone(raw_note["due"])
+
+        self.store.update(note.id, title="Updated note")
+        self.assertEqual(
+            {item.id: item for item in self.store.load()}[note.id].title,
+            "Updated note",
+        )
+
+    def test_notes_cannot_be_parents_or_root_items(self):
+        parent = self.store.add("Parent", date(2026, 9, 21))
+        task = self.store.add("Task", date(2026, 9, 21))
+        note = self.store.add_note("Context", parent.id)
+
+        with self.assertRaises(ValueError):
+            self.store.add_note("Nested note", note.id)
+        with self.assertRaises(ValueError):
+            self.store.add("Nested task", date(2026, 9, 21), note.id)
+        with self.assertRaises(ValueError):
+            self.store.reparent(task.id, note.id)
+        with self.assertRaises(ValueError):
+            self.store.reparent(note.id, None)
+
     def test_move_tasks_and_subtasks_within_their_groups(self):
         first = self.store.add("First", date(2026, 9, 21))
         second = self.store.add("Second", date(2026, 9, 21))
@@ -89,6 +121,7 @@ class StoreTests(unittest.TestCase):
         later_child = self.store.add(
             "Already later", date(2026, 9, 27), parent_id=parent.id
         )
+        note = self.store.add_note("No deadline", parent.id)
 
         adjusted = self.store.update(parent.id, due=date(2026, 9, 25))
         by_id = {task.id: task for task in self.store.load()}
@@ -96,6 +129,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(by_id[child.id].due, "2026-09-25")
         self.assertEqual(by_id[grandchild.id].due, "2026-09-25")
         self.assertEqual(by_id[later_child.id].due, "2026-09-27")
+        self.assertIsNone(by_id[note.id].due)
 
     def test_reparent_to_task_and_back_to_root(self):
         parent = self.store.add("Parent", date(2026, 9, 25))
@@ -254,6 +288,28 @@ class DisplayTests(unittest.TestCase):
         self.assertIn("└─", expanded[1].prefix)
 
         collapsed = vitodo.tree_rows(tasks, tasks, {parent.id})
+        self.assertEqual([row.task.title for row in collapsed], ["parent"])
+
+    def test_note_is_included_under_visible_parent_and_folds_with_it(self):
+        parent = self.make_task("parent", "2026-09-21")
+        note = vitodo.Task(
+            "note-id",
+            "context",
+            None,
+            "2026-09-01T00:00:00+00:00",
+            parent_id=parent.id,
+            kind="note",
+        )
+        tasks = [parent, note]
+        visible = vitodo.visible_tasks(
+            tasks, date(2026, 9, 21), date(2026, 9, 21)
+        )
+
+        expanded = vitodo.tree_rows(tasks, visible)
+        self.assertEqual([row.task.title for row in expanded], ["parent", "context"])
+        self.assertTrue(expanded[0].has_children)
+
+        collapsed = vitodo.tree_rows(tasks, visible, {parent.id})
         self.assertEqual([row.task.title for row in collapsed], ["parent"])
 
 
